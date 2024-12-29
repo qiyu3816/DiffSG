@@ -6,8 +6,6 @@ This repository contains code for exploratory experiments using generative diffu
 
 ## Files
 
-*This is an early work, please forgive for the irregular project architecture and code structure.* 
-
 **baselines**: The implementation of the baselines used in the article. 
 
 **datasets**: Dataset creation tools and some ready-made datasets. 
