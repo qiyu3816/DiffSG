@@ -95,6 +95,8 @@ class DDPM(nn.Module):
         self.ema_start = ema_start
         self.ema_update_rate = ema_update_rate
 
+        self.record_denoise_path = False
+
     def forward(self, y, cond):
         ts = torch.randint(low=0, high=self.T, size=(1, y.shape[0]), device=self.device)
         noise = torch.randn_like(y, device=self.device)
@@ -134,12 +136,22 @@ class DDPM(nn.Module):
             if i > self.T - 5:  # Normalization in case that solution value explosion in the early sampling.
                 y_t = (y_t - torch.mean(y_t)) / torch.sqrt(torch.var(y_t))
 
-            if i % 20 == 0 or i == self.T - 1 or i < 5 or self.T <= 20:
+            if self.record_denoise_path:
                 y_i_record.append(y_t.detach().cpu().numpy())
                 eps_i_record.append(eps.detach().cpu().numpy())
 
-        self.y_i_record = np.array(y_i_record)
-        self.eps_i_record = np.array(eps_i_record)
+        if self.record_denoise_path:
+            self.y_i_record = np.array(y_i_record)
+            for i in range(self.y_i_record.shape[0]):
+                if i <= 2:
+                    self.y_i_record[i] = torch.softmax(
+                        torch.tensor(self.y_i_record[i], dtype=torch.float32), dim=1).numpy()
+                else:
+                    self.y_i_record[i] = custom_decoder(
+                        torch.tensor(self.y_i_record[i], dtype=torch.float32)).numpy()
+            self.y_i_record = self.y_i_record.transpose(1, 0, 2).reshape(self.y_i_record.shape[1], -1)
+            self.eps_i_record = np.array(eps_i_record)
+            self.eps_i_record = self.eps_i_record.transpose(1, 0, 2).reshape(self.eps_i_record.shape[1], -1)
         return y_t
 
 
@@ -178,7 +190,7 @@ def train_ddpm_msr():
     use_ema = False
     warmup_epoch = 5
 
-    dataset_path = "../datasets/80c_20w_10000samples.csv"
+    dataset_path = "../datasets/3c_10w_10000samples.csv"
     X_train, Y_train, X_test, Y_test, custom_config = msr_data_load(dataset_path)
     dataset = data.TensorDataset(torch.tensor(X_train, dtype=torch.float32),
                                  torch.tensor(Y_train, dtype=torch.float32))
@@ -234,11 +246,11 @@ def custom_decoder(Y_pred):
 
 
 @torch.no_grad()
-def load_test_msr():
+def load_test_msr(ckpt_path):
     T = 20
-    omega = 150
+    omega = 500
 
-    dataset_path = "../datasets/80c_20w_10000samples.csv"
+    dataset_path = "../datasets/3c_10w_10000samples.csv"
     X_train, Y_train, X_test, Y_test, custom_config = msr_data_load(dataset_path)
     dataset = data.TensorDataset(torch.tensor(X_test, dtype=torch.float32),
                                  torch.tensor(Y_test, dtype=torch.float32))
@@ -255,7 +267,7 @@ def load_test_msr():
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     diffusion_model = DDPM(T, model, M, W, alphas, device, (1, M), custom_config, 0.1,
                            0.9999, 10, 5, False)
-    diffusion_model.load_state_dict(torch.load("../ready_models/ClassifierFree/80c_20w_20240109171558.pt"))
+    diffusion_model.load_state_dict(torch.load(ckpt_path))
     diffusion_model.to(device)
 
     Y_pred = None
@@ -335,9 +347,11 @@ def load_test_msr_debug():
 if __name__ == "__main__":
     print("########## Classifier-Free guidance diffusion for Computation Offloading. ##########")
     # diffusion_model = train_ddpm_msr()
-    #
-    # torch.save(diffusion_model.state_dict(), f"../ready_models/ClassifierFree/{diffusion_model.M}c_{int(diffusion_model.W)}w_{datetime.datetime.now():%Y%m%d%H%M%S}.pt")
-    #
-    # load_test_msr()
 
-    load_test_msr_debug()
+    # ckpt_path = f"../ckpts/ddpm_msr_{diffusion_model.M}c_{datetime.datetime.now():%Y%m%d%H%M%S}.pt"
+    # torch.save(diffusion_model.state_dict(), ckpt_path)
+
+    ckpt_path = "../ckpts/ddpm_msr_3c.pt"
+    load_test_msr(ckpt_path)
+
+    # load_test_msr_debug()

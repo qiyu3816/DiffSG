@@ -29,6 +29,9 @@ from ddpm_opt.UNetCF import UNet1D
 from ddpm_opt.ema import ExponentialMovingAverage
 
 
+width = 400
+height = 400
+
 def condition_C(y, x, width, height, P_sum):
     """
     Calculate the customized objectives and constraints in numerical conditions.
@@ -121,6 +124,8 @@ class DDPM(nn.Module):
         self.ema_start = ema_start
         self.ema_update_rate = ema_update_rate
 
+        self.record_denoise_path = False
+
     def forward(self, y, cond):
         ts = torch.randint(low=0, high=self.T, size=(1, y.shape[0]), device=self.device)
         noise = torch.randn_like(y, device=self.device)
@@ -160,12 +165,18 @@ class DDPM(nn.Module):
             if i > self.T - 5:  # Normalization in case that solution value explosion in the early sampling.
                 y_t = (y_t - torch.mean(y_t)) / torch.sqrt(torch.var(y_t))
 
-            if i % 20 == 0 or i == self.T - 1 or i < 5 or self.T <= 20:
+            if self.record_denoise_path:
                 y_i_record.append(y_t.detach().cpu().numpy())
                 eps_i_record.append(eps.detach().cpu().numpy())
 
-        self.y_i_record = np.array(y_i_record)
-        self.eps_i_record = np.array(eps_i_record)
+        if self.record_denoise_path:
+            self.y_i_record = np.array(y_i_record)
+            for j in range(self.y_i_record.shape[0]):
+                self.y_i_record[j] = custom_decoder(
+                    torch.tensor(self.y_i_record[j], dtype=torch.float32), width, height, self.P_sum).detach().cpu().numpy()
+            self.y_i_record = self.y_i_record.transpose(1, 0, 2).reshape(self.y_i_record.shape[1], -1)
+            self.eps_i_record = np.array(eps_i_record)
+            self.eps_i_record = self.eps_i_record.transpose(1, 0, 2).reshape(self.eps_i_record.shape[1], -1)
         return y_t
 
 
@@ -293,7 +304,7 @@ def rate_calc(Y_pred_decoded, X):
 
 
 @torch.no_grad()
-def load_test_nu():
+def load_test_nu(ckpt_path):
     T = 20
     omega = 500
 
@@ -316,7 +327,7 @@ def load_test_nu():
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     diffusion_model = DDPM(T, model, K, P_sum, alphas, device, (1, 2 + K), custom_config, 0.1,
                            0.9999, 10, 5, False)
-    diffusion_model.load_state_dict(torch.load("../ready_models/ClassifierFree/3u_18mW_20240114190313.pt"))
+    diffusion_model.load_state_dict(torch.load(ckpt_path))
     diffusion_model.to(device)
 
     Y_pred = None
@@ -356,10 +367,8 @@ def load_test_nu_debug():
     Load ready model for debug especially.
     """
     T = 20
-    omega = 800
+    omega = 500
 
-    width = 400
-    height = 400
     dataset_path = "../datasets/3u_18mW_10000samples.csv"
     X_train, Y_train, X_test, Y_test, R_test, custom_config = nu_data_load(dataset_path, width, height)
     K, P_sum = custom_config['K'], custom_config['P_sum']
@@ -374,49 +383,25 @@ def load_test_nu_debug():
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     diffusion_model = DDPM(T, model, K, P_sum, alphas, device, (1, 2 + K), custom_config, 0.1,
                            0.9999, 10, 5, False)
-    diffusion_model.load_state_dict(torch.load("../ready_models/ClassifierFree/3u_18mW_20240114190313.pt"))
+    diffusion_model.load_state_dict(torch.load("../ckpts/ddpm_nu_3u.pt"))
     diffusion_model.to(device)
 
     X_test_tensor = torch.tensor(X_test, dtype=torch.float32, device=device)
-
-    want2look = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
-    Y_pred = diffusion_model.sample(X_test_tensor, omega)
-    for j in range(diffusion_model.y_i_record.shape[0]):
-        diffusion_model.y_i_record[j] = custom_decoder(torch.tensor(diffusion_model.y_i_record[j], dtype=torch.float32), width, height, P_sum).detach().cpu().numpy()
-    for i in want2look:
-        print("%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%")
-        print(X_test_tensor[i], Y_pred[i])
-        for j in range(diffusion_model.y_i_record.shape[0]):
-            print(diffusion_model.y_i_record[j, i, :], diffusion_model.eps_i_record[j, i, :])
-        x = X_test_tensor[i].repeat(T, 1).detach().cpu().numpy()
-        x[:, [0, 2, 4]] *= width
-        x[:, [1, 3, 5]] *= height
-        df = pd.DataFrame(np.concatenate((x, diffusion_model.y_i_record[:, i, :]), axis=1))
-        df.to_csv(f"../results/NU/index{i}_3u_18mW_nu_trajectory.csv", header=None, index=False)
-        Y_test[i, 0] *= width
-        Y_test[i, 1] *= height
-        Y_test[i, 2:] *= P_sum
-        gt_df = pd.DataFrame(Y_test[i])
-        gt_df.to_csv(f"../results/NU/index{i}_3u_18mW_nu_ground_truth.csv", header=None, index=False)
-
-    display_sampling_time = 0
-    if display_sampling_time == 1:
-        total_time = 0
-        for i in tqdm(want2look):
-            tmp = torch.tensor(X_test[i], device=device, dtype=torch.float32)
-            a = time.time()
-            Y_pred = diffusion_model.sample(tmp, omega)
-            b = time.time()
-            total_time += b - a
-        print(f"Avg single sample time {total_time * 1000 / len(want2look)} ms")
+    diffusion_model.record_denoise_path = True
+    _ = diffusion_model.sample(X_test_tensor, omega)
+    df = pd.DataFrame(diffusion_model.y_i_record)
+    df.to_csv(f"../results/nu_denoise_path.csv", header=None, index=False)
+    print(f"Trajectory generating finished, {diffusion_model.y_i_record.shape[0]} samples stored.")
 
 
 if __name__ == "__main__":
     print("########## Classifier-Free guidance diffusion for NOMA-UAV. ##########")
     # diffusion_model = train_ddpm_nu()
     #
-    # torch.save(diffusion_model.state_dict(), f"../ready_models/ClassifierFree/{diffusion_model.K}u_{int(diffusion_model.P_sum)}mW_{datetime.datetime.now():%Y%m%d%H%M%S}.pt")
+    # ckpt_path = f"../ckpts/ddpm_nu_{diffusion_model.K}u_{datetime.datetime.now():%Y%m%d%H%M%S}.pt"
+    # torch.save(diffusion_model.state_dict(), ckpt_path)
 
-    # load_test_nu()
+    # ckpt_path = "../ckpts/ddpm_nu_3u.pt"
+    # load_test_nu(ckpt_path)
     #
     load_test_nu_debug()
